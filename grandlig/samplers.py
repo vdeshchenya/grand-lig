@@ -115,7 +115,7 @@ class BaseGrandCanonicalMonteCarloSampler(object):
         # Find NonbondedForce - needs to be updated to switch molecules on/off
         for f in range(system.getNumForces()):
             force = system.getForce(f)
-            if force.__class__.__name__ == "NonbondedForce":
+            if force.__class__.__name__ == "CustomNonbondedForce":
                 self.nonbonded_force = force
             # Flag an error if not simulating at constant volume
             elif "Barostat" in force.__class__.__name__:
@@ -162,10 +162,10 @@ class BaseGrandCanonicalMonteCarloSampler(object):
         self.custom_nb_force = None
         self.vdw_except_force = None
         self.ele_except_force = None
-        self.mol_vdw_excepts = {}  # Store the vdW exception IDs for each molecule
-        self.mol_ele_excepts = (
-            {}
-        )  # Store the electrostatic exception IDs for each molecule
+        # self.mol_vdw_excepts = {}  # Store the vdW exception IDs for each molecule
+        # self.mol_ele_excepts = (
+        #     {}
+        # )  # Store the electrostatic exception IDs for each molecule
 
         self.move_lambdas = (
             None,
@@ -338,51 +338,51 @@ class BaseGrandCanonicalMonteCarloSampler(object):
 
             # print(atom_ids)
             # Loop over vdW exceptions to find those which correspond to this molecule
-            vdw_exceptions = []
-            if self.vdw_except_force is not None:
-                for b in range(self.vdw_except_force.getNumBonds()):
-                    # Get the parameters for this 'bond'
-                    i, j, [sigma, epsilon, lambda_value] = (
-                        self.vdw_except_force.getBondParameters(b)
-                    )
+            # vdw_exceptions = []
+            # if self.vdw_except_force is not None:
+            #     for b in range(self.vdw_except_force.getNumBonds()):
+            #         # Get the parameters for this 'bond'
+            #         i, j, [sigma, epsilon, lambda_value] = (
+            #             self.vdw_except_force.getBondParameters(b)
+            #         )
 
-                    # Make sure that we don't have inter-molecular exceptions
-                    if (i in atom_ids and j not in atom_ids) or (
-                        i not in atom_ids and j in atom_ids
-                    ):
-                        raise Exception(
-                            "Currently not supporting inter-molecular exceptions"
-                        )
+            #         # Make sure that we don't have inter-molecular exceptions
+            #         if (i in atom_ids and j not in atom_ids) or (
+            #             i not in atom_ids and j in atom_ids
+            #         ):
+            #             raise Exception(
+            #                 "Currently not supporting inter-molecular exceptions"
+            #             )
 
-                    # Check if this corresponds to the molecule
-                    if i in atom_ids and j in atom_ids:
-                        vdw_exceptions.append(b)
+            #         # Check if this corresponds to the molecule
+            #         if i in atom_ids and j in atom_ids:
+            #             vdw_exceptions.append(b)
 
-            # Loop over vdW exceptions to find those which correspond to this molecule
-            ele_exceptions = []
-            if self.ele_except_force is not None:
-                for b in range(self.ele_except_force.getNumBonds()):
-                    # Get the parameters for this 'bond'
-                    i, j, [chargeprod, sigma, lambda_value] = (
-                        self.ele_except_force.getBondParameters(b)
-                    )
+            # # Loop over vdW exceptions to find those which correspond to this molecule
+            # ele_exceptions = []
+            # if self.ele_except_force is not None:
+            #     for b in range(self.ele_except_force.getNumBonds()):
+            #         # Get the parameters for this 'bond'
+            #         i, j, [chargeprod, sigma, lambda_value] = (
+            #             self.ele_except_force.getBondParameters(b)
+            #         )
 
-                    # Make sure that we don't have inter-molecular exceptions
-                    if (i in atom_ids and j not in atom_ids) or (
-                        i not in atom_ids and j in atom_ids
-                    ):
-                        raise Exception(
-                            "Currently not supporting inter-molecular exceptions"
-                        )
+            #         # Make sure that we don't have inter-molecular exceptions
+            #         if (i in atom_ids and j not in atom_ids) or (
+            #             i not in atom_ids and j in atom_ids
+            #         ):
+            #             raise Exception(
+            #                 "Currently not supporting inter-molecular exceptions"
+            #             )
 
-                    # Check if this corresponds to the molecule
-                    if i in atom_ids and j in atom_ids:
-                        ele_exceptions.append(b)
+            #         # Check if this corresponds to the molecule
+            #         if i in atom_ids and j in atom_ids:
+            #             ele_exceptions.append(b)
 
             # Save these IDs
             self.mol_atom_ids[resid] = atom_ids
-            self.mol_vdw_excepts[resid] = vdw_exceptions
-            self.mol_ele_excepts[resid] = ele_exceptions
+            # self.mol_vdw_excepts[resid] = vdw_exceptions
+            # self.mol_ele_excepts[resid] = ele_exceptions
 
         return None
 
@@ -439,7 +439,8 @@ class BaseGrandCanonicalMonteCarloSampler(object):
         Get all atom IDs for each molecule, noting heavy atoms in a second list
         """
         # Get the elements for all atoms in the system
-        elements = [atom.element.name for atom in self.topology.atoms()]
+        # There is no unheavy atoms in Martini
+        elements = ['X' for atom in self.topology.atoms()]
 
         mol_atom_ids = {}
         mol_heavy_ids = {}
@@ -550,61 +551,60 @@ class BaseGrandCanonicalMonteCarloSampler(object):
         ):  # If the lambda has changed from previous one.
             for i, atom_idx in enumerate(atoms):
                 # Obtain original parameters
-                atom_params = self.mol_params[i]
-                # Update charge in NonbondedForce
-                self.nonbonded_force.setParticleParameters(
+                atom_params = self.custom_nb_force.getParticleParameters(i) # type, q, lambda, lambda_ele
+                # Update lambda_ele
+                self.custom_nb_force.setParticleParameters(
                     atom_idx,
-                    charge=(lambda_ele * atom_params["charge"]),
-                    sigma=atom_params["sigma"],
-                    epsilon=abs(0.0),
+                    [atom_params[0], atom_params[1], atom_params[2], lambda_ele],
                 )
-            self.nonbonded_force.updateParametersInContext(self.context)
+            # Update context with new parameters
+            self.custom_nb_force.updateParametersInContext(self.context)
 
         #  Now the VDW
         if lambda_vdw != self.move_lambdas[0]:
             # print('Changing VDW')
             for i, atom_idx in enumerate(atoms):
                 # Obtain original parameters
-                atom_params = self.mol_params[i]
-                # Update lambda in CustomNonbondedForce
+                atom_params = self.custom_nb_force.getParticleParameters(i) # type, q, lambda, lambda_ele
+                # Update lambda
                 self.custom_nb_force.setParticleParameters(
                     atom_idx,
-                    [atom_params["sigma"], atom_params["epsilon"], lambda_vdw],
+                    [atom_params[0], atom_params[1], lambda_vdw, atom_params[2]],
                 )
 
             # Update context with new parameters
             self.custom_nb_force.updateParametersInContext(self.context)
 
         self.move_lambdas = (lambda_vdw, lambda_ele)
-        # Update the exceptions, where relevant
-        if self.vdw_except_force is not None:
-            # Update vdW exceptions
-            vdw_exceptions = self.mol_vdw_excepts[resid]
-            for exception_id in vdw_exceptions:
-                # Get atom IDs and parameters
-                i, j, [sigma, epsilon, old_lambda] = (
-                    self.vdw_except_force.getBondParameters(exception_id)
-                )
-                # Set the new value of lambda
-                self.vdw_except_force.setBondParameters(
-                    exception_id, i, j, [sigma, epsilon, lambda_vdw]
-                )
+        # # Update the exceptions, where relevant
+        # if self.vdw_except_force is not None:
+        #     # Update vdW exceptions
+        #     vdw_exceptions = self.mol_vdw_excepts[resid]
+        #     for exception_id in vdw_exceptions:
+        #         # Get atom IDs and parameters
+        #         i, j, [sigma, epsilon, old_lambda] = (
+        #             self.vdw_except_force.getBondParameters(exception_id)
+        #         )
+        #         # Set the new value of lambda
+        #         self.vdw_except_force.setBondParameters(
+        #             exception_id, i, j, [sigma, epsilon, lambda_vdw]
+        #         )
 
-            # Update electrostatic exceptions
-            ele_exceptions = self.mol_ele_excepts[resid]
-            for exception_id in ele_exceptions:
-                # Get atom IDs and parameters
-                i, j, [chargeprod, sigma, old_lambda] = (
-                    self.ele_except_force.getBondParameters(exception_id)
-                )
-                # Set the new value of lambda
-                self.ele_except_force.setBondParameters(
-                    exception_id, i, j, [chargeprod, sigma, lambda_ele]
-                )
+        #     # Update electrostatic exceptions
+        #     ele_exceptions = self.mol_ele_excepts[resid]
+        #     for exception_id in ele_exceptions:
+        #         # Get atom IDs and parameters
+        #         i, j, [chargeprod, sigma, old_lambda] = (
+        #             self.ele_except_force.getBondParameters(exception_id)
+        #         )
+        #         # Set the new value of lambda
+        #         self.ele_except_force.setBondParameters(
+        #             exception_id, i, j, [chargeprod, sigma, lambda_ele]
+        #         )
 
-            # Update context with new parameters
-            self.vdw_except_force.updateParametersInContext(self.context)
-            self.ele_except_force.updateParametersInContext(self.context)
+        #     # Update context with new parameters
+        #     self.vdw_except_force.updateParametersInContext(self.context)
+        #     self.ele_except_force.updateParametersInContext(self.context)
 
         return None
 

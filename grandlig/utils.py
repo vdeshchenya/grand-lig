@@ -12,6 +12,7 @@ Marley Samways
 Ollie Melling
 """
 import os
+import re
 import numpy as np
 import mdtraj
 import parmed
@@ -21,6 +22,7 @@ from openmm import app
 from copy import deepcopy
 from scipy.cluster import hierarchy
 from tqdm import tqdm
+from copy import deepcopy
 
 
 class PDBRestartReporter(object):
@@ -84,7 +86,7 @@ def get_data_file(filename):
 
 
 def add_ghosts(
-    topology, positions, molfile="tip3p.pdb", n=10, pdb="gcmc-extra-wats.pdb"
+    topology, positions, mol_topology, mol_positions, n=10, pdb="gcmc-extra-wats.pdb"
 ):
     """
     Function to add molecules to a topology, as extras for GCMC
@@ -150,36 +152,24 @@ def add_ghosts(
 
     # print(box_vectors)
 
-    # Make sure that this molecule file exists
-    if not os.path.isfile(molfile):
-        # If not, check if it exists in the data directory  (This is where a water and some std ligands will be)
-        if os.path.isfile(get_data_file(molfile)):
-            molfile = get_data_file(molfile)
-        else:
-            # Raise an error otherwise
-            raise Exception("File {} does not exist".format(molfile))
-
-    # Load the PDB for the molecule
-    molecule = app.PDBFile(molfile)
-
     # Calculate the centre of geometry of the molecule
     cog = np.zeros(3) * unit.nanometers
-    for i in range(len(molecule.positions)):
-        cog += molecule.positions[i]
-    cog /= len(molecule.positions)
+    for i in range(len(mol_positions)):
+        cog += mol_positions[i]
+    cog /= len(mol_positions)
 
     # Add multiple copies of the same molecule, then write out a pdb (for visualisation)
     ghosts = []
     for i in range(n):
         # Read in template molecule positions
-        positions = molecule.positions
+        positions = mol_positions
 
         # Need to translate the molecule to a random point in the simulation box
         new_centre = (
             np.matmul(np.random.rand(3), box_vectors._value) + translation._value
         ) * unit.nanometers
 
-        new_positions = deepcopy(molecule.positions)
+        new_positions = deepcopy(mol_positions)
         for i in range(len(positions)):
             # print(positions[i])
             # print(new_centre)
@@ -187,7 +177,7 @@ def add_ghosts(
             new_positions[i] = positions[i] + new_centre - cog
 
         # Add the molecule to the model and include the resid in a list
-        modeller.add(addTopology=molecule.topology, addPositions=new_positions)
+        modeller.add(addTopology=mol_topology, addPositions=new_positions)
         ghosts.append(modeller.topology._numResidues - 1)
 
     # Take the ghost chain as the one after the last chain (alphabetically)
@@ -596,88 +586,65 @@ def create_custom_forces(system, topology, resnames):
 
     Returns
     -------
-    param_dict : dict
-        Dictionary containing parameters for each atom of each molecule. The keys are the residue names and the items
-        are lists. Each list contains (in order) dictionaries storing the charge, sigma and epsilon parameters for each
-        atom of that residue
     custom_sterics : openmm.CustomNonbondedForce
         Handles the softcore LJ interactions
     """
-    # Find NonbondedForce - needs to be updated to switch molecules on/off
+    # Find CustomNonbondedForce
     for f in range(system.getNumForces()):
         force = system.getForce(f)
-        if force.__class__.__name__ == "NonbondedForce":
-            nonbonded_force = force
+        if force.__class__.__name__ == "CustomNonbondedForce":
+            martini_nb_force_index = f
+            martini_nb_force = force
 
-    # Make sure that sigma is not equal to zero to avoid division by zero in the soft-core potential calculations
-    for atom_idx in range(nonbonded_force.getNumParticles()):
-        [charge, sigma, epsilon] = nonbonded_force.getParticleParameters(atom_idx)
-        if np.isclose(sigma._value, 0.0):
-            sigma = 1.0 * unit.angstrom
-            nonbonded_force.setParticleParameters(atom_idx, charge, sigma, epsilon)
+    # Find exception forces
+    counter = 0
+    for f in range(system.getNumForces()):
+        force = system.getForce(f)
+        if force.__class__.__name__ == "CustomBondForce": 
+            counter += 1
+        if counter == 2: es_except_force = force
+        elif counter == 3: 
+            lj_except_force = force
+            break
 
-    # Get the parameters corresponding to each molecule type
-    param_dict = {}
-    for resname in resnames:
-        # Create an entry for this residue
-        param_dict[resname] = []
-        for residue in topology.residues():
-            if residue.name == resname:
-                for atom in residue.atoms():
-                    # Read the parameters of this atom and add to the list of this residue
-                    atom_params = nonbonded_force.getParticleParameters(atom.index)
-                    param_dict[resname].append(
-                        {
-                            "charge": atom_params[0],
-                            "sigma": atom_params[1],
-                            "epsilon": atom_params[2],
-                        }
-                    )
-                # Break this loop, as we only need to read one instance
-                break
-
-    #  Need to make sure that the electrostatics are handled using PME (for now)
-    if nonbonded_force.getNonbondedMethod() != openmm.NonbondedForce.PME:
-        raise Exception("Currently only supporting PME for long range electrostatics")
+    # Get energy function parameters
+    nonbonded_cutoff = martini_nb_force.getCutoffDistance()
+    match = re.search(r"epsilon_r\s*=\s*([0-9.]+)", martini_nb_force.getEnergyFunction())
+    assert not (match is None)
+    epsilon_r = float(match.group(1))
 
     # Define the energy expression for the softcore sterics
-    # lj_energy = ("U;"
-    #              "U = (lambda^soft_a) * 4 * epsilon * x * (x-1.0);"  # Softcore energy
-    #              "x = (sigma/reff)^6;"  # Define x as sigma/r(effective)
-    #              # Calculate effective distance
-    #              "reff = sigma*((soft_alpha*(1.0-lambda)^soft_b + (r/sigma)^soft_c))^(1/soft_c)")
-
-    lj_energy = (
-        "U;"
-        "U = (lambda) * 4 * epsilon * x * (x-1.0);"  # Softcore energy
-        "x = (sigma/reff)^6;"  # Define x as sigma/r(effective)
-        # Calculate effective distance
-        "reff = sigma*((0.5*(1.0-lambda) + (r/sigma)^6))^(1/6)"
+    energy_expr = (
+        "step(rcut-r) * (lambda * (LJ - corr) + ES);"
+        "LJ = (C12(type1, type2) * x * x - C6(type1, type2) * x);"
+        "x = 1 / (r^6 + 0.5 * (1 - lambda) * C12(type1, type2) / C6(type1, type2));"
+        "lambda = lambda1*lambda2;"
+        "corr = (C12(type1, type2) / rcut^12 - C6(type1, type2) / rcut^6);"
+        "ES = f/epsilon_r*q1*lambda_ele1*q2*lambda_ele2 * (1/r + krf * r^2 - crf);"
+        "crf = 1 / rcut + krf * rcut^2;"
+        "krf = 1 / (2 * rcut^3);"
+        f"epsilon_r = {epsilon_r};"
+        "f = 138.935458;"
+        f"rcut={nonbonded_cutoff.value_in_unit(unit.nanometers)};"
     )
-    # Define combining rules
-    lj_combining = "; sigma = 0.5*(sigma1+sigma2); epsilon = sqrt(epsilon1*epsilon2); lambda = lambda1*lambda2"
-
     # Create a customised sterics force
-    custom_sterics = openmm.CustomNonbondedForce(lj_energy + lj_combining)
-    # Add necessary particle parameters
-    custom_sterics.addPerParticleParameter("sigma")
-    custom_sterics.addPerParticleParameter("epsilon")
+    custom_sterics = openmm.CustomNonbondedForce(energy_expr)
+
+    # Add necessary particle parameters: type, q, lambda, lambda_ele
+    custom_sterics.addPerParticleParameter("type")
+    custom_sterics.addPerParticleParameter("q")
     custom_sterics.addPerParticleParameter("lambda")
-    # Assume that the system is periodic (for now)
+    custom_sterics.addPerParticleParameter("lambda_ele")
+
+    # Set nonbonded method
     custom_sterics.setNonbondedMethod(openmm.CustomNonbondedForce.CutoffPeriodic)
-    # Transfer properties from the original force
-    custom_sterics.setUseSwitchingFunction(nonbonded_force.getUseSwitchingFunction())
-    custom_sterics.setCutoffDistance(nonbonded_force.getCutoffDistance())
-    custom_sterics.setSwitchingDistance(nonbonded_force.getSwitchingDistance())
-    nonbonded_force.setUseDispersionCorrection(False)
-    custom_sterics.setUseLongRangeCorrection(
-        nonbonded_force.getUseDispersionCorrection()
-    )
-    # Set softcore parameters  Dont need them if hard coded into energy function. Speeds things up a it.
-    # custom_sterics.addGlobalParameter('soft_alpha', 0.5)
-    # custom_sterics.addGlobalParameter('soft_a', 1)
-    # custom_sterics.addGlobalParameter('soft_b', 1)
-    # custom_sterics.addGlobalParameter('soft_c', 6)
+    custom_sterics.setCutoffDistance(nonbonded_cutoff)
+
+    # Copy tabulated C6 and C12 functions from original nb force
+    for i in range(martini_nb_force.getNumTabulatedFunctions()):
+        func_name = martini_nb_force.getTabulatedFunctionName(i)
+        func = deepcopy(martini_nb_force.getTabulatedFunction(i))
+        custom_sterics.addTabulatedFunction(func_name, func)
 
     # Get a list of all molecule atom IDs
     mol_atom_ids = []
@@ -687,23 +654,32 @@ def create_custom_forces(system, topology, resnames):
                 mol_atom_ids.append(atom.index)
 
     # Copy all steric interactions into the custom force, and remove them from the original force
-    for atom_idx in range(nonbonded_force.getNumParticles()):
-        # Get atom parameters
-        [charge, sigma, epsilon] = nonbonded_force.getParticleParameters(atom_idx)
-
-        # Add particle to the custom force (with lambda=1 for now)
-        custom_sterics.addParticle([sigma, epsilon, 1.0])
-        # Dont get rid of the interactions in the original force yet, because we need that information for the exceptions below
+    for atom_idx in range(martini_nb_force.getNumParticles()):
+        params = martini_nb_force.getParticleParameters(atom_idx)
+        # Add particle to the custom force (with lambdas=1 for now)
+        custom_sterics.addParticle([params[0], params[1], 1.0, 1.0])
 
     # Get a dictionary of atom pairs subject to exceptions
-    exception_dict = {}
-    num_excepts = nonbonded_force.getNumExceptions()
-    for exception_idx in range(num_excepts):
-        [i, j, chargeprod, sigma, epsilon] = nonbonded_force.getExceptionParameters(
-            exception_idx
-        )
-        exception_dict[exception_idx] = [i, j]
+    exclusion_dict = {}
+    num_exclusions= martini_nb_force.getNumExclusions()
+    for exclusion_idx in range(num_exclusions):
+        i, j = martini_nb_force.getExclusionParticles(exclusion_idx)
+        exclusion_dict[exclusion_idx] = [i, j]
+    
+    # Remove old force from the system
+    system.removeForce(martini_nb_force_index)
 
+    # Get tabulated C6 and C12 functions
+    assert custom_sterics.getNumTabulatedFunctions() == 2
+    if custom_sterics.getTabulatedFunctionName(0) == 'C6':
+        tab_c6 = custom_sterics.getTabulatedFunction(0).getFunctionParameters()
+        tab_c12 = custom_sterics.getTabulatedFunction(1).getFunctionParameters()
+    else:
+        tab_c6 = custom_sterics.getTabulatedFunction(1).getFunctionParameters()
+        tab_c12 = custom_sterics.getTabulatedFunction(0).getFunctionParameters()
+    tab_c6 = np.array(tab_c6[2]).reshape(tab_c6[0], tab_c6[1])
+    tab_c12 = np.array(tab_c12[2]).reshape(tab_c12[0], tab_c12[1])
+    
     # Make sure all intramolecular interactions for the molecules of interest are set to exceptions, so they aren't switched off
     for residue in topology.residues():
         if residue.name in resnames:
@@ -712,61 +688,38 @@ def create_custom_forces(system, topology, resnames):
             # Loop over all possible interactions between atoms in this molecule
             for x, atom_x in enumerate(atom_ids):
                 for atom_y in atom_ids[x + 1 :]:
-                    # Check if there is an exception already for this interaction
-                    except_id = None
-                    """
-                    for exception_idx in range(nonbonded_force.getNumExceptions()):
-                        [i, j, chargeprod, sigma, epsilon] = nonbonded_force.getExceptionParameters(exception_idx)
-                        if atom_x in [i, j] and atom_y in [i, j]:
-                            except_id = exception_idx
-                            break
-                    """
-                    for exception_idx in range(num_excepts):
+                    exclud_id = None
+                    for exclusion_idx in range(num_exclusions):
                         if (
-                            atom_x in exception_dict[exception_idx]
-                            and atom_y in exception_dict[exception_idx]
+                            atom_x in exclusion_dict[exclusion_idx]
+                            and atom_y in exclusion_dict[exclusion_idx]
                         ):
-                            except_id = exception_idx
+                            exclud_id = exclusion_idx
                             break
-                    # Add an exception if there is not one already
-                    if except_id is None:
-                        [charge_x, sigma_x, epsilon_x] = (
-                            nonbonded_force.getParticleParameters(atom_x)
-                        )
-                        [charge_y, sigma_y, epsilon_y] = (
-                            nonbonded_force.getParticleParameters(atom_y)
-                        )
-                        # Combine parameters (Lorentz-Berthelot)
-                        chargeprod = charge_x * charge_y
-                        sigma = 0.5 * (sigma_x + sigma_y)
-                        epsilon = (epsilon_x * epsilon_y).sqrt()
-                        # Create the exception
-                        nonbonded_force.addException(
-                            atom_x, atom_y, chargeprod, sigma, epsilon
-                        )
+                    
+                    if exclud_id is None:
+                        type1, q1 = custom_sterics.getParticleParameters(atom_x)[:2]
+                        type2, q2 = custom_sterics.getParticleParameters(atom_y)[:2]
 
-    # Copy over all exceptions into the new force as exclusions and add to the exception forces, where necessary
-    for exception_idx in range(nonbonded_force.getNumExceptions()):
-        [i, j, chargeprod, sigma, epsilon] = nonbonded_force.getExceptionParameters(
-            exception_idx
-        )
+                        if q1 * q2 != 0:
+                            es_except_force.addBond(atom_x, atom_y, [q1 * q2])
 
-        # Copy this over as an exclusion so it isn't counted by the CustomNonbonded Force
-        custom_sterics.addExclusion(i, j)
+                        type1 = int(type1); type2 = int(type2)
+                        c6 = tab_c6[type1, type2]
+                        c12 = tab_c12[type1, type2]
 
-    # Turn off everything in the nonbonded force to avoid double counting with the custom nonbonded force
-    for atom_idx in range(nonbonded_force.getNumParticles()):
-        # Get atom parameters
-        [charge, sigma, epsilon] = nonbonded_force.getParticleParameters(atom_idx)
+                        if c6 * c12 != 0:
+                            lj_except_force.addBond(atom_x, atom_y, [c12, c6])
 
-        # Disable steric interactions in the original force by setting epsilon=0 (keep the charges for PME purposes)
-        nonbonded_force.setParticleParameters(atom_idx, charge, sigma, abs(0))
+                    # Turn off everything in the nonbonded force to avoid double counting with the custom nonbonded force
+                    custom_sterics.addExclusion(atom_x, atom_y)
+
 
     # Add the custom force to the system
     system.addForce(custom_sterics)
 
-    # return param_dict, custom_sterics, electrostatic_exceptions, steric_exceptions
-    return param_dict, custom_sterics
+    # return custom_sterics
+    return custom_sterics
 
 
 def LinearAlchemicalFunction(start, end, lambda_in):
