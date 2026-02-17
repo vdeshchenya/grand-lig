@@ -156,9 +156,6 @@ class BaseGrandCanonicalMonteCarloSampler(object):
         self.gcmc_resids = []  # GCMC molecules
 
         # Need to customise forces to handle softcore steric interactions and exceptions
-        self.mol_params = (
-            []
-        )  # List to store nonbonded parameters for each atom in the GCNCMC molecules
         self.custom_nb_force = None
         self.vdw_except_force = None
         self.ele_except_force = None
@@ -178,11 +175,9 @@ class BaseGrandCanonicalMonteCarloSampler(object):
         # Create the custom forces, if requested (default)
         if createCustomForces:
             # Create the custom forces
-            param_dict, self.custom_nb_force = utils.create_custom_forces(
+            self.custom_nb_force = utils.create_custom_forces(
                 system, topology, [resname]
             )
-            # Get molecule parameters
-            self.mol_params = param_dict[resname]
             # Also need to assign exception IDs to each molecule ID
             self.getMoleculeExceptions()
         else:
@@ -242,7 +237,7 @@ class BaseGrandCanonicalMonteCarloSampler(object):
         self.logger.info("BaseGrandCanonicalMonteCarloSampler object initialised")
 
     def setCustomForces(
-        self, param_list, custom_nb_force, elec_bond_force, steric_bond_force
+        self, custom_nb_force, elec_bond_force, steric_bond_force
     ):
         """
         Set the custom force objects to forces created elsewhere - if createCustomForces was set to False, this function
@@ -260,9 +255,6 @@ class BaseGrandCanonicalMonteCarloSampler(object):
         steric_bond_force : openmm.CustomBondForce
             Handles the steric exceptions (if relevant, None otherwise)
         """
-        # Set the molecule parameters
-        self.mol_params = param_list
-
         # Check that the Forces haven't already been created - don't want to worry about overwriting for the time being
         if any(
             [

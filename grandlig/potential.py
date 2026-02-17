@@ -41,7 +41,8 @@ def calc_mu_ex(
     matout="U_matrix.npy",
     pressure=None,
     turnOff=True,
-    platform=None
+    platform=None,
+    device_id=None
 ):
     """
     Calculate the excess chemical potential of a molecule in a given system,
@@ -114,6 +115,9 @@ def calc_mu_ex(
 
     if platform:
         platform = Platform.getPlatformByName(platform)
+        if device_id:
+            platform.setPropertyDefaultValue("Precision", "mixed")
+            platform.setPropertyDefaultValue("DeviceIndex", device_id)
     else:                                              
         try:
             platform = Platform.getPlatformByName("CUDA")
@@ -151,6 +155,8 @@ def calc_mu_ex(
             volume=True,
         )
     )
+
+    simulation.step(50000) # my: initial eq
 
     # Simulate the system at each lambda window
     for i in range(n_lambdas):
@@ -228,7 +234,7 @@ def calc_mu_ex(
 
 
 def calc_avg_volume(
-    system, topology, positions, box_vectors, temperature, n_samples, n_equil, platform=None
+    system, topology, positions, box_vectors, temperature, n_samples, n_equil, platform=None, device_id=None
 ):
     """
     Calculate the average volume of each species in a given system and parameters, this is the volume
@@ -266,6 +272,9 @@ def calc_avg_volume(
 
     if platform:
         platform = Platform.getPlatformByName(platform)
+        if device_id:
+            platform.setPropertyDefaultValue("Precision", "mixed")
+            platform.setPropertyDefaultValue("DeviceIndex", device_id)
     else:                                              
         try:
             platform = Platform.getPlatformByName("CUDA")
